@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Stake.com Visual Balance & Live Stats Modifier
 // @namespace    http://tampermonkey.net/
-// @version      9.12
-// @description  Adds a persistent fake USDC balance, live stat tracking with a working graph, and an integrated settings UI to visually simulate gameplay on Stake.com (including slots). Now with balance decrease on losses!
+// @version      9.14
+// @description  Adds a persistent fake USDC balance, live stat tracking with a working graph, and an integrated settings UI to visually simulate gameplay on Stake.com (including slots). Balance decreases on losses!
 // @author       XaRTeCK (Enhanced by Gemini)
 // @match        *://stake.com/*
 // @match        *://rgs.twist-rgs.com/*
@@ -25,7 +25,6 @@
 
     let currentFakeBet = { amount: 0, currency: null };
     let fakeStats = getFakeStats();
-    let lastBalanceUpdate = 0;
 
     let lastPopupActionTime = 0;
 
@@ -103,7 +102,6 @@
 
         try {
             localStorage.setItem(BALANCE_STORAGE_KEY, numericAmount.toString());
-            lastBalanceUpdate = Date.now();
         } catch (e) {
             console.error('[Visual Modifier] Could not save balance to localStorage:', e);
             return false;
@@ -154,7 +152,7 @@
             <div id="visual-script-welcome" style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); pointer-events: auto !important; background-color: #2f3c4c; color: #fff; padding: 25px; border-radius: 10px; box-shadow: 0 5px 20px rgba(0,0,0,0.5); z-index: 2147483647; max-width: 450px; text-align: center; font-family: 'Inter', sans-serif;">
                 <h2 style="margin: 0 0 15px 0; font-size: 22px;">Visual Gameplay Modifier Active</h2>
                 <p style="margin: 0 0 20px 0; font-size: 16px; line-height: 1.5; color: #b0bdce;">
-                    Set your visual USDC balance below. Balance will automatically decrease on losses and increase on wins!
+                    Set your visual USDC balance below. Balance will increase on wins and decrease on losses!
                 </p>
                 <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 20px;">
                      <input type="number" step="0.01" id="popup-fake-balance-input" value="${getFakeUsdcValue()}"
@@ -288,18 +286,28 @@
     function updateStatsAndHistory(betAmount, payout) {
         const previousBalance = getFakeUsdcValue();
         let newBalance = previousBalance;
+        let netProfit = 0;
 
         fakeStats.wagered += betAmount;
-        if (payout > 0) {
+        
+        // FIX: Calculate profit correctly based on payout vs bet
+        if (payout >= betAmount) {
+            // WIN: payout is greater than or equal to bet
             fakeStats.wins++;
-            fakeStats.profit += payout - betAmount;
-            newBalance = previousBalance + (payout - betAmount);
+            netProfit = payout - betAmount;
+            fakeStats.profit += netProfit;
+            newBalance = previousBalance + netProfit;
+            console.log(`[Visual Modifier] ✅ WIN - Bet: ${betAmount}, Payout: ${payout}, Net: +${netProfit.toFixed(2)}`);
         } else {
+            // LOSS: payout is less than bet (or 0)
             fakeStats.losses++;
-            fakeStats.profit -= betAmount;
-            newBalance = previousBalance - betAmount;
+            netProfit = -(betAmount - payout);
+            fakeStats.profit += netProfit;
+            newBalance = previousBalance - (betAmount - payout);
+            console.log(`[Visual Modifier] ❌ LOSS - Bet: ${betAmount}, Payout: ${payout}, Net: -${(betAmount - payout).toFixed(2)}`);
         }
 
+        // Never go below 0
         newBalance = Math.max(0, newBalance);
         setFakeUsdcValue(newBalance);
         
@@ -307,7 +315,7 @@
         saveFakeStats(fakeStats);
         updateLiveStatsDisplay();
         
-        console.log(`[Visual Modifier] Balance: ${previousBalance.toFixed(2)} → ${newBalance.toFixed(2)} | Profit: ${fakeStats.profit.toFixed(2)}`);
+        console.log(`[Visual Modifier] Balance: ${previousBalance.toFixed(2)} → ${newBalance.toFixed(2)} | Total Profit: ${fakeStats.profit.toFixed(2)}`);
     }
 
     function zeroBetAmounts(obj) {
@@ -356,7 +364,6 @@
         const host = requestUrl.hostname;
         const path = requestUrl.pathname;
 
-        // Intercept RGS wallet authenticate
         if (host.includes('rgs.twist-rgs.com') && path.includes('/wallet/authenticate')) {
             const response = await originalFetch(url, options);
             const data = await response.clone().json();
@@ -364,23 +371,19 @@
             return new Response(JSON.stringify(data), { status: 200, headers: response.headers });
         }
 
-        // Intercept GraphQL API
         if (host.includes('stake.com') && path.includes('/_api/graphql') && options?.body) {
             let requestBody;
             try { requestBody = JSON.parse(options.body); } catch (e) { return originalFetch(url, options); }
             let modifiedOptions = options;
 
-            // Handle UserBalances query - inject our fake balance
             if (requestBody.operationName === 'UserBalances') {
                 const response = await originalFetch(url, options);
                 const data = await response.clone().json();
                 const usdcBalance = data?.data?.user?.balances.find(b => b.available.currency === 'usdc');
                 if (usdcBalance) usdcBalance.available.amount = FAKE_USDC_BALANCE;
-                console.log('[Visual Modifier] Injected balance in UserBalances query');
                 return new Response(JSON.stringify(data), { status: response.status, headers: response.headers });
             }
 
-            // Handle bet mutations
             if (requestBody.query?.includes('mutation') && requestBody.variables?.amount > 0) {
                 currentFakeBet = { amount: requestBody.variables.amount, currency: requestBody.variables.currency };
                 const modifiedBody = JSON.parse(JSON.stringify(requestBody));
@@ -407,7 +410,6 @@
             } catch (e) { return responseClone; }
         }
 
-        // Casino API (slots, dice, roulette)
         if (host.includes('stake.com') && path.startsWith('/_api/casino/')) {
             let modifiedOptions = options;
 
@@ -456,7 +458,6 @@
                 return responseClone;
             } catch (e) { return responseClone; }
         }
-
         return originalFetch(url, options);
     };
 

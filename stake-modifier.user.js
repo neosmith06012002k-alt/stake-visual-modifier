@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stake.com Visual Balance & Live Stats Modifier
 // @namespace    http://tampermonkey.net/
-// @version      9.11
+// @version      9.12
 // @description  Adds a persistent fake USDC balance, live stat tracking with a working graph, and an integrated settings UI to visually simulate gameplay on Stake.com (including slots). Now with balance decrease on losses!
 // @author       XaRTeCK (Enhanced by Gemini)
 // @match        *://stake.com/*
@@ -21,21 +21,15 @@
     const BALANCE_STORAGE_KEY = 'stake_fake_usdc_balance_v1';
     const STATS_STORAGE_KEY = 'stake_fake_stats_usdc_v1';
     const DEFAULT_USDC_VALUE = 1000;
-    // USDC is an ERC-20 token with 6 decimals, so 1 USDC = 1,000,000 base units
     const USDC_BASE_UNITS = 1_000_000;
 
     let currentFakeBet = { amount: 0, currency: null };
     let fakeStats = getFakeStats();
+    let lastBalanceUpdate = 0;
 
-    // ============================================================
-    // Popup event handling — bound IMMEDIATELY at document-start,
-    // before any Stake.com script exists, so our capture-phase
-    // listeners are the first ones the browser calls.
-    // ============================================================
     let lastPopupActionTime = 0;
 
     function handlePopupEvent(event) {
-        // Keyboard support: Enter / Space, only when focus is inside the popup.
         if (event.type === 'keydown') {
             if (event.key !== 'Enter' && event.key !== ' ') return;
             const popup = document.getElementById('visual-script-welcome');
@@ -48,11 +42,9 @@
         const trigger = target.closest('#popup-balance-save, #visual-script-close, #visual-script-overlay');
         if (!trigger) return;
 
-        // Prevent Stake's own handlers from also reacting to our popup.
         event.stopImmediatePropagation();
         if (event.type === 'keydown') event.preventDefault();
 
-        // pointerdown + mousedown + click all fire for a single press — act on the first only.
         const now = Date.now();
         if (now - lastPopupActionTime < 250) return;
         lastPopupActionTime = now;
@@ -87,18 +79,16 @@
         return savedBalance ? parseFloat(savedBalance) : DEFAULT_USDC_VALUE;
     }
 
-    // Best effort: find the element(s) currently displaying the balance and rewrite the
-    // text immediately, without waiting for a React re-render or a balance refetch.
     function updateVisibleBalance(value) {
         const text = value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         let updated = false;
         const seen = new Set();
 
         const maybeUpdate = (el) => {
-            if (seen.has(el) || el.children.length > 0) return; // skip containers/buttons with icons
+            if (seen.has(el) || el.children.length > 0) return;
             seen.add(el);
             const raw = (el.textContent || '').trim();
-            if (!raw || raw.length > 20 || !/^[\d\s.,-]+$/.test(raw)) return; // must look like a plain number
+            if (!raw || raw.length > 20 || !/^[\d\s.,-]+$/.test(raw)) return;
             el.textContent = text;
             updated = true;
         };
@@ -107,13 +97,13 @@
         return updated;
     }
 
-    // Hardened: writes the value to storage AND tries to update the visible balance live.
     function setFakeUsdcValue(amount) {
         const numericAmount = parseFloat(amount);
         if (isNaN(numericAmount) || numericAmount < 0) return false;
 
         try {
             localStorage.setItem(BALANCE_STORAGE_KEY, numericAmount.toString());
+            lastBalanceUpdate = Date.now();
         } catch (e) {
             console.error('[Visual Modifier] Could not save balance to localStorage:', e);
             return false;
@@ -122,12 +112,8 @@
         const footerInput = document.getElementById('fake-balance-input-usdc');
         if (footerInput) footerInput.value = numericAmount.toFixed(2);
 
-        const updated = updateVisibleBalance(numericAmount);
-        if (!updated) {
-            console.warn('[Visual Modifier] Balance saved to storage, but no visible balance element was found. A page refresh will apply it.');
-        }
+        updateVisibleBalance(numericAmount);
 
-        // Fallback nudge: forces Stake's balance component to re-render if this selector still exists.
         try {
             const balanceToggle = document.querySelector('[data-testid="balance-toggle"] button');
             if (balanceToggle) {
@@ -163,12 +149,12 @@
     }
 
     function showBalanceSetupPopup() {
-        if (document.getElementById('visual-script-welcome')) return; // avoid duplicates
+        if (document.getElementById('visual-script-welcome')) return;
         const popupHTML = `
             <div id="visual-script-welcome" style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); pointer-events: auto !important; background-color: #2f3c4c; color: #fff; padding: 25px; border-radius: 10px; box-shadow: 0 5px 20px rgba(0,0,0,0.5); z-index: 2147483647; max-width: 450px; text-align: center; font-family: 'Inter', sans-serif;">
                 <h2 style="margin: 0 0 15px 0; font-size: 22px;">Visual Gameplay Modifier Active</h2>
                 <p style="margin: 0 0 20px 0; font-size: 16px; line-height: 1.5; color: #b0bdce;">
-                    Set your visual USDC balance below. You can change this amount anytime at the bottom of the Stake.com page. Your balance will increase on wins and decrease on losses!
+                    Set your visual USDC balance below. Balance will automatically decrease on losses and increase on wins!
                 </p>
                 <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 20px;">
                      <input type="number" step="0.01" id="popup-fake-balance-input" value="${getFakeUsdcValue()}"
@@ -238,7 +224,6 @@
         const svg = statsContainer.querySelector('div.graph-wrap svg');
 
         if (wageredEl && winsEl && lossesEl) {
-             // USDC is pegged 1:1 with USD, so no conversion multiplier is needed.
              const profitValue = fakeStats.profit;
              const wageredValue = fakeStats.wagered;
              const formatCurrency = (value) => value.toLocaleString('en-US', { style: 'currency', currency: 'USD' }).replace('$', '€');
@@ -263,7 +248,7 @@
             <div id="fake-balance-settings" class="p-4 mt-6 border-t-2 border-t-grey-500 text-grey-200">
               <div class="flex flex-col gap-2 max-w-sm mx-auto">
                 <label for="fake-balance-input-usdc" class="ds-body-md-strong text-white text-center">Visual Balance Modifier</label>
-                <p class="ds-body-sm text-center">This only changes the balance you see on your screen. Balance will update with wins and losses!</p>
+                <p class="ds-body-sm text-center">This only changes the balance you see on your screen. Balance updates with wins/losses!</p>
                 <input type="number" step="0.01" id="fake-balance-input-usdc" value="${getFakeUsdcValue().toFixed(2)}"
                        style="background-color: #1f2a38; border: 1px solid #3c4a5c; color: white; border-radius: 5px; padding: 8px; width: 100%; text-align: center;"
                 >
@@ -315,10 +300,7 @@
             newBalance = previousBalance - betAmount;
         }
 
-        // Ensure balance doesn't go negative
         newBalance = Math.max(0, newBalance);
-        
-        // Update the fake balance to reflect wins/losses
         setFakeUsdcValue(newBalance);
         
         fakeStats.profitHistory.push(fakeStats.profit);
@@ -328,10 +310,6 @@
         console.log(`[Visual Modifier] Balance: ${previousBalance.toFixed(2)} → ${newBalance.toFixed(2)} | Profit: ${fakeStats.profit.toFixed(2)}`);
     }
 
-    // ============ Slot support helpers ============
-
-    // Recursively zero out every positive "amount" found anywhere in a request body
-    // and return the total. Handles flat casino bodies as well as nested slot payloads.
     function zeroBetAmounts(obj) {
         let total = 0;
         if (!obj || typeof obj !== 'object') return total;
@@ -351,8 +329,6 @@
         return total;
     }
 
-    // Deep-search a response for the game result object (an object that carries both an
-    // amount and a payout / payoutMultiplier). Slot results are usually nested under "result".
     function findGameResult(data) {
         if (!data || typeof data !== 'object') return null;
         const seen = new Set();
@@ -372,8 +348,6 @@
         return null;
     }
 
-    // ============ END helpers ============
-
     const originalFetch = window.fetch;
     window.fetch = async function(url, options) {
         const FAKE_USDC_BALANCE = getFakeUsdcValue();
@@ -382,6 +356,7 @@
         const host = requestUrl.hostname;
         const path = requestUrl.pathname;
 
+        // Intercept RGS wallet authenticate
         if (host.includes('rgs.twist-rgs.com') && path.includes('/wallet/authenticate')) {
             const response = await originalFetch(url, options);
             const data = await response.clone().json();
@@ -389,19 +364,23 @@
             return new Response(JSON.stringify(data), { status: 200, headers: response.headers });
         }
 
+        // Intercept GraphQL API
         if (host.includes('stake.com') && path.includes('/_api/graphql') && options?.body) {
             let requestBody;
             try { requestBody = JSON.parse(options.body); } catch (e) { return originalFetch(url, options); }
             let modifiedOptions = options;
 
+            // Handle UserBalances query - inject our fake balance
             if (requestBody.operationName === 'UserBalances') {
                 const response = await originalFetch(url, options);
                 const data = await response.clone().json();
                 const usdcBalance = data?.data?.user?.balances.find(b => b.available.currency === 'usdc');
                 if (usdcBalance) usdcBalance.available.amount = FAKE_USDC_BALANCE;
+                console.log('[Visual Modifier] Injected balance in UserBalances query');
                 return new Response(JSON.stringify(data), { status: response.status, headers: response.headers });
             }
 
+            // Handle bet mutations
             if (requestBody.query?.includes('mutation') && requestBody.variables?.amount > 0) {
                 currentFakeBet = { amount: requestBody.variables.amount, currency: requestBody.variables.currency };
                 const modifiedBody = JSON.parse(JSON.stringify(requestBody));
@@ -428,11 +407,10 @@
             } catch (e) { return responseClone; }
         }
 
-        // ============ Casino API (covers slots too) ============
+        // Casino API (slots, dice, roulette)
         if (host.includes('stake.com') && path.startsWith('/_api/casino/')) {
             let modifiedOptions = options;
 
-            // Matches dice/roulette bets, bonus rounds, AND slot spins (/bet, /spin, /buy-feature, etc.)
             if (/\/(bet|roll|bonus|spin|play|buy)$/.test(path) && options?.body) {
                 try {
                     const originalRequestBody = JSON.parse(options.body);
@@ -443,7 +421,6 @@
                             if (Array.isArray(modifiedBody[key])) modifiedBody[key].forEach(bet => { totalAmount += bet.amount; bet.amount = 0; });
                         });
                     } else {
-                        // Slots (and everything else): zero any "amount" at any nesting depth
                         totalAmount = zeroBetAmounts(modifiedBody);
                     }
                     if (totalAmount > 0) {
@@ -460,7 +437,6 @@
             const responseClone = response.clone();
             try {
                 const data = await response.json();
-                // Deep-search instead of only checking top-level keys -> handles slot "result" nesting
                 const gameData = findGameResult(data);
                 if (gameData && currentFakeBet.amount > 0) {
                     const isFreeSpin = (gameData.amount || 0) === 0;
@@ -474,13 +450,13 @@
                     updateStatsAndHistory(betForStats, gameData.payout);
                     if (gameData.state?.rounds) gameData.state.rounds.forEach(r => { if ('amount' in r) r.amount = currentFakeBet.amount; });
 
-                    // Keep tracking while a slot bonus round is in progress; reset once fully done
                     if (!gameData.active && !gameData.bonusActive) currentFakeBet = { amount: 0, currency: null };
                     return new Response(JSON.stringify(data), { status: 200, headers: response.headers });
                 }
                 return responseClone;
             } catch (e) { return responseClone; }
         }
+
         return originalFetch(url, options);
     };
 
